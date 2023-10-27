@@ -1,0 +1,130 @@
+- hosts: dbs
+  become: yes
+  pre_tasks: 
+    - name: Build wsrep_cluster_address dynamically
+      set_fact:
+        wsrep_cluster_address: "gcomm://{{ groups['dbs'] | map('extract', hostvars, ['ansible_host']) | join(',') }}"
+  tasks:
+
+    - name: Stop unattended-upgrades service
+      service:
+        name: unattended-upgrades
+        state: stopped
+
+    - name: Disable unattended-upgrades service on boot
+      systemd:
+        name: unattended-upgrades
+        enabled: no
+
+    - name: Wait for cloud-init / user-data to finish
+      command: cloud-init status --wait
+      changed_when: false
+
+    - name: Flush iptables rules
+      shell: iptables -F
+
+    - name: Allow FORWARD traffic
+      shell: iptables -A FORWARD -j ACCEPT
+
+    - name: Allow INPUT traffic
+      shell: iptables -A INPUT -j ACCEPT
+
+    - name: Allow OUTPUT traffic
+      shell: iptables -A OUTPUT -j ACCEPT
+
+    - name: Update apt cache
+      apt:
+        force_apt_get: yes
+        update_cache: yes
+
+    - name: Install necessary packages
+      apt:
+        name:
+          - mariadb-server
+        state: present
+
+    - name: Configure Galera Cluster in galera.cnf
+      copy:
+        content: |
+          [mysqld]
+          binlog_format=ROW
+          default-storage-engine=innodb
+          innodb_autoinc_lock_mode=2
+          bind-address=0.0.0.0
+          wsrep_on=ON
+          wsrep_provider=/usr/lib/galera/libgalera_smm.so
+          wsrep_cluster_name="galera_cluster"
+          wsrep_cluster_address="{{ wsrep_cluster_address }}"
+          wsrep_node_address="{{ ansible_host }}"
+          wsrep_node_name="{{ inventory_hostname }}"
+          wsrep_sst_method=rsync
+        dest: /etc/mysql/conf.d/galera.cnf
+
+    - name: secure mariadb
+      become: yes
+      expect:
+        command: mysql_secure_installation
+        responses:
+          'Enter current password for root': ''
+          'Switch to unix_socket authentication': 'n'
+          'Change the root password': 'n'
+          'Remove anonymous users': 'y'
+          'Disallow root login remotely': 'y'
+          'Remove test database': 'y'
+          'Reload privilege tables now': 'y'
+        timeout: 1
+      register: secure_mariadb
+      failed_when: "'... Failed!' in secure_mariadb.stdout_lines"
+      
+    - name: Stop MySQL service
+      service:
+        name: mysql
+        state: stopped
+
+    - name: Comment bind-address in mariadb configuration
+      replace:
+        path: /etc/mysql/mariadb.conf.d/50-server.cnf
+        regexp: '^\s*bind-address\s*=\s*127.0.0.1'
+        replace: '#bind-address            = 127.0.0.1'
+
+    - name: Bootstrap the cluster on node1
+      command: "galera_new_cluster"
+      when: inventory_hostname == hostvars[groups['dbs'][0]].ansible_hostname
+      
+    - name: Start MariaDB service on other nodes
+      service:
+        name: mysql
+        state: started
+      when: inventory_hostname != hostvars[groups['dbs'][0]].ansible_hostname
+
+    - name: Create healthcheck user
+      shell: mysql -e "CREATE USER 'health_check'@'%' IDENTIFIED BY '';"
+      when: inventory_hostname == hostvars[groups['dbs'][0]].ansible_hostname
+
+    - name: Create the database
+      shell: mysql -e "CREATE DATABASE IF NOT EXISTS galera_health"
+      when: inventory_hostname == hostvars[groups['dbs'][0]].ansible_hostname
+
+    - name: Create the health_status table
+      shell: mysql -e "CREATE TABLE IF NOT EXISTS galera_health.health_status (id INT AUTO_INCREMENT PRIMARY KEY, status VARCHAR(10));"
+      when: inventory_hostname == hostvars[groups['dbs'][0]].ansible_hostname
+
+    - name: Create the leader election table
+      shell: mysql -e "CREATE TABLE IF NOT EXISTS galera_health.leader_election (id INT NOT NULL PRIMARY KEY, node VARCHAR(255),last_seen TIMESTAMP);"
+      when: inventory_hostname == hostvars[groups['dbs'][0]].ansible_hostname
+
+    - name: Insert a record indicating healthy
+      shell: mysql -e "INSERT INTO galera_health.health_status (status) VALUES ('healthy');"
+      when: inventory_hostname == hostvars[groups['dbs'][0]].ansible_hostname
+
+    - name: Insert record into leader election for oracle
+      shell: mysql -e "INSERT INTO galera_health.leader_election (id, node, last_seen) VALUES (1, NULL, NOW());"
+      when: inventory_hostname == hostvars[groups['dbs'][0]].ansible_hostname
+    
+    - name: Insert record into leader election for azure
+      shell: mysql -e "INSERT INTO galera_health.leader_election (id, node, last_seen) VALUES (2, NULL, NOW());"
+      when: inventory_hostname == hostvars[groups['dbs'][0]].ansible_hostname
+
+    - name: Grant privileges to health check user
+      shell: mysql -e "GRANT ALL PRIVILEGES ON galera_health.* TO 'health_check'@'%';"
+      when: inventory_hostname == hostvars[groups['dbs'][0]].ansible_hostname

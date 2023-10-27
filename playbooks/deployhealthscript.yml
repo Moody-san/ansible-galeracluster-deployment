@@ -1,0 +1,165 @@
+- name: Copy Health script and Run it
+  hosts: masters
+  become: true
+  vars:
+    GALERA_HOST_NODE_ONE: "{{hostvars[groups['dbs'][0]].ansible_host}}"
+    GALERA_HOST_NODE_TWO: "{{hostvars[groups['dbs'][1]].ansible_host}}"
+    GALERA_HOST_NODE_THREE: "{{hostvars[groups['dbs'][2]].ansible_host}}"
+  tasks:
+    - name: Update apt cache
+      apt:
+        update_cache: yes
+     
+    - name: Install necessary packages
+      apt:
+        name:
+          - mariadb-client
+        state: present
+
+    - name: Ensure destination directory exists
+      file:
+        path: "/home/ubuntu/health"
+        state: directory
+      become_user: ubuntu
+
+    - name: Copy db service to target hosts
+
+      copy:
+        content: |
+          apiVersion: v1
+          kind: Service
+          metadata:
+            name: db
+          spec:
+            ports:
+              - protocol: TCP
+                port: 3306
+                targetPort: 3306
+        dest: /home/ubuntu/health/db_svc.yml
+
+    - name: Copy db endpoints to target hosts
+      copy:
+        content: |
+          apiVersion: v1
+          kind: Endpoints
+          metadata:
+            name: db
+          subsets:
+            - addresses:
+                - ip: {{ item.ip }}
+              ports:
+                - port: 3306
+        dest: "/home/ubuntu/health/db{{ item.node }}_endpoint.yml"
+      loop: 
+        - { ip: "{{GALERA_HOST_NODE_ONE}}", node: "1" }
+        - { ip: "{{GALERA_HOST_NODE_TWO}}", node: "2" }
+        - { ip: "{{GALERA_HOST_NODE_THREE}}", node: "3" }
+      become_user: ubuntu
+
+    
+    - name: Apply default svc and endpoint to node 1
+      shell: kubectl apply -f /home/ubuntu/health/db_svc.yml && kubectl apply -f /home/ubuntu/health/db1_endpoint.yml
+      when: inventory_hostname == 'oraclemaster' or inventory_hostname == 'azuremaster'
+      become_user: ubuntu
+
+    - name: Copy the health script
+      copy:
+        content: |
+          #!/bin/bash
+
+          GALERA_HOST_NODE_ONE="{{ GALERA_HOST_NODE_ONE }}"
+          GALERA_HOST_NODE_TWO="{{ GALERA_HOST_NODE_TWO }}"
+          GALERA_HOST_NODE_THREE="{{ GALERA_HOST_NODE_THREE }}"
+          DB_USER="health_check"
+          DATABASE="galera_health"
+          MY_HOSTNAME=$(hostname)
+          LEADER_TIMEOUT=10
+          
+          #determine cloud and choose record based on it
+          if [[ "$MY_HOSTNAME" == *oracle* ]]; then
+            recordId=1
+          elif [[ "$MY_HOSTNAME" == *azure* ]]; then
+            recordId=2
+          else
+            recordId=1 # Default to 1 if neither "oracle" nor "azure" is found in the hostname
+          fi
+
+          # Try to become the leader
+          become_leader() {
+              mysql -h $GALERA_HOST_NODE_ONE -u $DB_USER $DATABASE -e "UPDATE leader_election SET node='$MY_HOSTNAME', last_seen=NOW() WHERE id= $recordId AND (node IS NULL OR TIMESTAMPDIFF(SECOND, last_seen, NOW()) > $LEADER_TIMEOUT)" 2>> /home/ubuntu/health/healthscriptlog.txt \
+              || mysql -h $GALERA_HOST_NODE_TWO -u $DB_USER $DATABASE -e "UPDATE leader_election SET node='$MY_HOSTNAME', last_seen=NOW() WHERE id= $recordId AND (node IS NULL OR TIMESTAMPDIFF(SECOND, last_seen, NOW()) > $LEADER_TIMEOUT)" 2>> /home/ubuntu/health/healthscriptlog.txt \
+              || mysql -h $GALERA_HOST_NODE_THREE -u $DB_USER $DATABASE -e "UPDATE leader_election SET node='$MY_HOSTNAME', last_seen=NOW() WHERE id= $recordId AND (node IS NULL OR TIMESTAMPDIFF(SECOND, last_seen, NOW()) > $LEADER_TIMEOUT)" 2>> /home/ubuntu/health/healthscriptlog.txt
+          }
+
+          # Check if I'm the leader
+          is_leader() {
+              local count
+
+              count=$(mysql -h $GALERA_HOST_NODE_ONE -u $DB_USER $DATABASE -e "SELECT COUNT(*) FROM leader_election WHERE id= $recordId AND node = '$MY_HOSTNAME' AND TIMESTAMPDIFF(SECOND, last_seen, NOW()) < $LEADER_TIMEOUT" -N -s 2>> /home/ubuntu/health/healthscriptlog.txt) \
+              || count=$(mysql -h $GALERA_HOST_NODE_TWO -u $DB_USER $DATABASE -e "SELECT COUNT(*) FROM leader_election WHERE id= $recordId AND node = '$MY_HOSTNAME' AND TIMESTAMPDIFF(SECOND, last_seen, NOW()) < $LEADER_TIMEOUT" -N -s 2>> /home/ubuntu/health/healthscriptlog.txt) \
+              || count=$(mysql -h $GALERA_HOST_NODE_THREE -u $DB_USER $DATABASE -e "SELECT COUNT(*) FROM leader_election WHERE id= $recordId AND node = '$MY_HOSTNAME' AND TIMESTAMPDIFF(SECOND, last_seen, NOW()) < $LEADER_TIMEOUT" -N -s 2>> /home/ubuntu/health/healthscriptlog.txt)
+              
+              [[ "$count" -eq 1 ]]
+          }
+
+          update_k8s_endpoint() {
+              local galera_ip=$1
+              local galera_node_number=$2
+              local current_ip=$(kubectl get endpoints db -o=jsonpath='{.subsets[0].addresses[0].ip}' 2>> /home/ubuntu/health/healthscriptlog.txt)
+              
+              if [[ "$galera_ip" != "$current_ip" ]]; then
+                  kubectl delete endpoints db >> /home/ubuntu/health/healthscriptlog.txt 2>&1
+                  kubectl apply -f /home/ubuntu/health/db"${galera_node_number}"_endpoint.yml >> /home/ubuntu/health/healthscriptlog.txt 2>&1
+              fi
+          }
+
+          while true; do
+              become_leader
+              if is_leader; then
+                  if mysql -h $GALERA_HOST_NODE_ONE -u $DB_USER $DATABASE -e "SELECT status FROM health_status" 2>> /home/ubuntu/health/healthscriptlog.txt; then
+                      update_k8s_endpoint $GALERA_HOST_NODE_ONE "1"
+                  elif mysql -h $GALERA_HOST_NODE_TWO -u $DB_USER $DATABASE -e "SELECT status FROM health_status" 2>> /home/ubuntu/health/healthscriptlog.txt; then
+                      update_k8s_endpoint $GALERA_HOST_NODE_TWO "2"
+                  elif mysql -h $GALERA_HOST_NODE_THREE -u $DB_USER $DATABASE -e "SELECT status FROM health_status" 2>> /home/ubuntu/health/healthscriptlog.txt; then
+                      update_k8s_endpoint $GALERA_HOST_NODE_THREE "3"
+                  else
+                      :
+                  fi
+              else
+                    echo "I'm not the leader" >> /home/ubuntu/health/healthscriptlog.txt 2>&1
+              fi
+              sleep 5
+          done
+        dest: "/home/ubuntu/health/health.sh"
+        mode: '0755'
+        owner: ubuntu
+
+    - name: Create systemd unit file
+      copy:
+        content: |
+          [Unit]
+          Description=Health Check Script
+
+          [Service]
+          User=ubuntu
+          ExecStart=/home/ubuntu/health/health.sh
+          WorkingDirectory=/home/ubuntu/health
+          Restart=always
+          RestartSec=1
+
+          [Install]
+          WantedBy=multi-user.target
+      dest: /etc/systemd/system/healthcheck.service
+      become: yes
+
+    - name: Reload systemd
+      systemd:
+        daemon_reload: yes
+      become: yes
+
+    - name: Enable and start the service
+      systemd:
+        name: healthcheck.service
+        enabled: yes
+        state: started
+      become: yes
