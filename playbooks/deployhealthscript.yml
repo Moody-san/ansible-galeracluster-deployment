@@ -1,6 +1,7 @@
 - name: Copy Health script and Run it
   hosts: masters
   become: true
+  become_user: root
   vars:
     GALERA_HOST_NODE_ONE: "{{hostvars[groups['dbs'][0]].ansible_host}}"
     GALERA_HOST_NODE_TWO: "{{hostvars[groups['dbs'][1]].ansible_host}}"
@@ -23,7 +24,6 @@
       become_user: ubuntu
 
     - name: Copy db service to target hosts
-
       copy:
         content: |
           apiVersion: v1
@@ -135,6 +135,7 @@
         owner: ubuntu
 
     - name: Create systemd unit file
+
       copy:
         content: |
           [Unit]
@@ -149,17 +150,14 @@
 
           [Install]
           WantedBy=multi-user.target
-      dest: /etc/systemd/system/healthcheck.service
-      become: yes
+        dest: /etc/systemd/system/healthcheck.service
 
     - name: Reload systemd
       systemd:
         daemon_reload: yes
-      become: yes
 
     - name: Enable and start the service
       systemd:
         name: healthcheck.service
         enabled: yes
         state: started
-      become: yes

@@ -1,37 +1,11 @@
 - hosts: dbs
   become: yes
+  become_user: root
   pre_tasks: 
     - name: Build wsrep_cluster_address dynamically
       set_fact:
         wsrep_cluster_address: "gcomm://{{ groups['dbs'] | map('extract', hostvars, ['ansible_host']) | join(',') }}"
   tasks:
-
-    - name: Stop unattended-upgrades service
-      service:
-        name: unattended-upgrades
-        state: stopped
-
-    - name: Disable unattended-upgrades service on boot
-      systemd:
-        name: unattended-upgrades
-        enabled: no
-
-    - name: Wait for cloud-init / user-data to finish
-      command: cloud-init status --wait
-      changed_when: false
-
-    - name: Flush iptables rules
-      shell: iptables -F
-
-    - name: Allow FORWARD traffic
-      shell: iptables -A FORWARD -j ACCEPT
-
-    - name: Allow INPUT traffic
-      shell: iptables -A INPUT -j ACCEPT
-
-    - name: Allow OUTPUT traffic
-      shell: iptables -A OUTPUT -j ACCEPT
-
     - name: Update apt cache
       apt:
         force_apt_get: yes
