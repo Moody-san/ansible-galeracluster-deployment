@@ -1,6 +1,6 @@
 # Ansible Galera Cluster Deployment
 
-This repository hosts Ansible playbooks for deploying a Galera Cluster, which is a high-availability solution for MySQL databases. It is designed to simplify the setup Galera Cluster with failover in k8s .
+This repository hosts Ansible playbooks for deploying a Galera Cluster with failover in k8s .
 
 ## Prerequisites
 
