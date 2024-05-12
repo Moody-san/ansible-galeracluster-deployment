@@ -21,3 +21,12 @@ ansible-playbook addhealthscript.yml -i ../inventory/inventory
 ## Additional Resources
 - **K8s Cluster Setup**: For setting up a K8s Cluster , visit [ansible-galeracluster-deployment](https://github.com/Moody-san/ansible-k8s-deployment).
 - **CI/CD and Automation**: For CI/CD and other automation scripts, refer to [ansible-controller-setup](https://github.com/Moody-san/ansible-controller-setup).
+
+## How it works
+
+
+https://github.com/Moody-san/ansible-galeracluster-deployment/assets/87976665/06c25ae9-5561-4d26-ad11-3db86f6e67d0
+
+
+[Click here to View animated Gif](https://github.com/Moody-san/ansible-galeracluster-deployment/assets/87976665/b90c9a5e-b5aa-4888-9376-ba894904d8b0)
+
