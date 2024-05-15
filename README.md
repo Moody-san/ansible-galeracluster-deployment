@@ -25,7 +25,7 @@ ansible-playbook addhealthscript.yml -i ../inventory/inventory
 ## How it works
 
 
-https://www.youtube.com/watch?v=7lCZTS3z6kk
+https://www.youtube.com/watch?v=tebUOlwWW7g
 
 
 [Click here to View animated Gif](https://github.com/Moody-san/ansible-galeracluster-deployment/assets/87976665/b90c9a5e-b5aa-4888-9376-ba894904d8b0)
